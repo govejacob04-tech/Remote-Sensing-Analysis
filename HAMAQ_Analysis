@@ -1,0 +1,805 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# author: jgove
+""" Integrating TEMPO, Pandora, and surface observations."""
+
+import io
+import os
+import re
+import time
+import calendar
+import warnings
+from datetime import datetime, timedelta
+import tempfile
+import requests
+import concurrent.futures
+import numpy as np 
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates 
+import matplotlib.gridspec as gridspec
+import matplotlib.ticker as mticker
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import matplotlib.image as mpimg
+import pytz
+import xarray as xr
+import earthaccess
+
+try:
+    import pyrsig
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    import cartopy.io.shapereader as shpreader
+    from shapely.geometry.polygon import Polygon
+    from shapely.geometry import box
+    from scipy.stats import binned_statistic_2d
+except ModuleNotFoundError as e:
+    print(f"Missing dependency: {e}")
+    raise
+plt.close('all') 
+
+wv_session = requests.Session()
+pgn_session = requests.Session()
+
+# Helper functions
+simat_stations = {
+    'ACO': {'lat': 19.635501, 'lon': -98.912003}, 'AJU': {'lat': 19.154286, 'lon': -99.162611},
+    'AJM': {'lat': 19.272161, 'lon': -99.207744}, 'ARA': {'lat': 19.470218, 'lon': -99.074549},
+    'ATI': {'lat': 19.576963, 'lon': -99.254133}, 'AZC': {'lat': 19.487728, 'lon': -99.198657},
+    'BJU': {'lat': 19.370464, 'lon': -99.159596}, 'CAM': {'lat': 19.468404, 'lon': -99.169794},
+    'CCA': {'lat': 19.326111, 'lon': -99.176111}, 'CES': {'lat': 19.334731, 'lon': -99.074678},
+    'CFE': {'lat': 19.414393, 'lon': -99.194279}, 'CHO': {'lat': 19.266948, 'lon': -98.886088},
+    'COR': {'lat': 19.265346, 'lon': -99.02604},  'COY': {'lat': 19.350258, 'lon': -99.157101},
+    'CUA': {'lat': 19.365313, 'lon': -99.291705}, 'CUI': {'lat': 19.469859, 'lon': -99.165849},
+    'CUT': {'lat': 19.722186, 'lon': -99.198602}, 'DIC': {'lat': 19.298819, 'lon': -99.185774},
+    'EAJ': {'lat': 19.271222, 'lon': -99.203971}, 'EDL': {'lat': 19.313357, 'lon': -99.310635},
+    'FAC': {'lat': 19.482473, 'lon': -99.243524}, 'FAN': {'lat': 19.299126, 'lon': -99.17492},
+    'GAM': {'lat': 19.482700, 'lon': -99.094517}, 'HAN': {'lat': 19.420518, 'lon': -99.083623},
+    'HGM': {'lat': 19.411617, 'lon': -99.152207}, 'IBM': {'lat': 19.443319, 'lon': -99.21536},
+    'IMP': {'lat': 19.487561, 'lon': -99.147294}, 'INN': {'lat': 19.291968, 'lon': -99.38052},
+    'IZT': {'lat': 19.384413, 'lon': -99.117641}, 'LAA': {'lat': 19.483781, 'lon': -99.147312},
+    'LAG': {'lat': 19.442420, 'lon': -99.135183}, 'LLA': {'lat': 19.578792, 'lon': -99.039644},
+    'LOM': {'lat': 19.403000, 'lon': -99.242062}, 'LPR': {'lat': 19.534727, 'lon': -99.11772},
+    'LVI': {'lat': 19.467890, 'lon': -99.117749}, 'MCM': {'lat': 19.429071, 'lon': -99.131924},
+    'MER': {'lat': 19.424610, 'lon': -99.119594}, 'MGH': {'lat': 19.404050, 'lon': -99.20266},
+    'MIN': {'lat': 19.421440, 'lon': -99.162885}, 'MON': {'lat': 19.460415, 'lon': -98.902853},
+    'MPA': {'lat': 19.176900, 'lon': -98.990189}, 'NET': {'lat': 19.421150, 'lon': -99.026119},
+    'NEZ': {'lat': 19.393734, 'lon': -99.028212}, 'PED': {'lat': 19.325146, 'lon': -99.204136},
+    'PER': {'lat': 19.382860, 'lon': -98.991858}, 'PLA': {'lat': 19.365869, 'lon': -99.200109},
+    'POT': {'lat': 19.376494, 'lon': -99.145766}, 'SAG': {'lat': 19.532968, 'lon': -99.030324},
+    'SFE': {'lat': 19.357357, 'lon': -99.262865}, 'SHA': {'lat': 19.446203, 'lon': -99.207868},
+    'SJA': {'lat': 19.452592, 'lon': -99.086095}, 'SNT': {'lat': 19.250385, 'lon': -99.256462},
+    'SUR': {'lat': 19.314480, 'lon': -99.149994}, 'TAC': {'lat': 19.453907, 'lon': -99.202455},
+    'TAH': {'lat': 19.246459, 'lon': -99.010564}, 'TAX': {'lat': 19.335689, 'lon': -99.123204},
+    'TEC': {'lat': 19.487227, 'lon': -99.114229}, 'TLA': {'lat': 19.529077, 'lon': -99.204597},
+    'TLI': {'lat': 19.602542, 'lon': -99.177173}, 'TPN': {'lat': 19.257041, 'lon': -99.184177},
+    'UAX': {'lat': 19.304441, 'lon': -99.103629}, 'UIZ': {'lat': 19.360794, 'lon': -99.07388},
+    'UNM': {'lat': 19.482238, 'lon': -99.147137}, 'VAL': {'lat': 19.522437, 'lon': -99.165702},
+    'VIF': {'lat': 19.658223, 'lon': -99.09659},  'XAL': {'lat': 19.525995, 'lon': -99.0824},
+    'XCH': {'lat': 19.267066, 'lon': -99.118252}, 'FAR': {'lat': 19.473692, 'lon': -99.046176},
+    'SAC': {'lat': 19.345610, 'lon': -99.009381}
+}
+
+def load_simat_csv(filepath, target_date):
+    try:
+        df = pd.read_csv(filepath, sep=None, engine='python', skiprows=9) 
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df.columns = [str(c).lower().strip() for c in df.columns]
+    if 'value' in df.columns and 'valor' not in df.columns:
+        df = df.rename(columns={'value': 'valor'})
+    
+    local_tz_mx = pytz.timezone("America/Mexico_City")
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df = df.dropna(subset=['date'])
+    df['date'] = df['date'].dt.tz_localize(local_tz_mx, ambiguous='NaT', nonexistent='shift_forward').dt.tz_convert('UTC').dt.tz_localize(None)
+    
+    if 'valor' in df.columns:
+        df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
+    if 'id_parameter' in df.columns:
+        df['id_parameter'] = df['id_parameter'].astype(str).str.strip()
+    
+    local_start = local_tz_mx.localize(pd.to_datetime(target_date))
+    utc_start = local_start.astimezone(pytz.UTC).replace(tzinfo=None)
+    utc_end = utc_start + timedelta(hours=23, minutes=59, seconds=59)
+    
+    df = df[(df['date'] >= utc_start) & (df['date'] <= utc_end)]
+    df['lat'] = df['id_station'].map(lambda x: simat_stations.get(x, {}).get('lat', np.nan))
+    df['lon'] = df['id_station'].map(lambda x: simat_stations.get(x, {}).get('lon', np.nan))
+    df = df.dropna(subset=['lat', 'lon', 'valor'])
+    df = df.rename(columns={'date': 'time', 'id_station': 'STATION'})
+    
+    df_o3 = df[df['id_parameter'] == 'O3'].copy().rename(columns={'valor': 'ozone'})
+    df_pm25 = df[df['id_parameter'] == 'PM2.5'].copy().rename(columns={'valor': 'pm25'})
+    return df_o3, df_pm25
+
+def fetch_with_retries(rsig_instance, data_key, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return rsig_instance.to_dataframe(data_key, unit_keys=False, parse_dates=True, backend='xdr')
+        except Exception as e:
+            if "less than 20-bytes" in str(e) or "No data" in str(e): return pd.DataFrame()
+            time.sleep(5)
+    return pd.DataFrame()
+
+def standardize_index(df):
+    if df is None or df.empty: return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        for col in ['time', 'date', 'TIME', 'DATE']:
+            if col in df.columns:
+                if not pd.api.types.is_datetime64_any_dtype(df[col]): df[col] = pd.to_datetime(df[col])
+                df.set_index(col, inplace=True)
+                break
+    if isinstance(df.index, pd.DatetimeIndex):
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        df.sort_index(inplace=True)
+    return df
+
+def get_hourly_slice_fast(df, start_t, end_t):
+    if df is None or df.empty: return pd.DataFrame()
+    return df.loc[start_t : end_t - timedelta(seconds=1)].copy()
+
+def fetch_pgn_api_data(instrument, location, lat, lon, target_date, no2_col_index=38):
+    BASE_URL = "https://api.pandonia-global-network.org/v1"
+    start_str, end_str = target_date.strftime("%Y-%m-%dT00:00:00"), target_date.strftime("%Y-%m-%dT23:59:59")
+    params = {"pan_id": instrument, "spectrometer": "1", "location": location, "code": "rnvs3", "start_datetime": start_str, "end_datetime": end_str}
+    try:
+        response = pgn_session.get(f"{BASE_URL}/download/bulk_l2", params=params, timeout=15)
+        response.raise_for_status() 
+    except: return pd.DataFrame()
+    lines = response.text.split('\n')
+    data_start_idx = next((i for i, line in enumerate(lines) if line.strip().startswith('202') and len(line.split()) > 20), 0)
+    if data_start_idx == 0: return pd.DataFrame()
+    try: df = pd.read_csv(io.StringIO('\n'.join(lines[data_start_idx:])), sep=r'\s+', header=None, on_bad_lines='skip')
+    except: return pd.DataFrame()
+    if df.empty or len(df.columns) <= no2_col_index: return pd.DataFrame()
+    
+    formatted_df = pd.DataFrame()
+    formatted_df['time'] = pd.to_datetime(df[0], errors='coerce', format='mixed')
+    formatted_df['STATION'] = f"{location} (Pan {instrument})"
+    formatted_df['lat'], formatted_df['lon'] = lat, lon
+    formatted_df['nitrogen_dioxide_vertical_column_amount'] = pd.to_numeric(df[no2_col_index], errors='coerce') * 6.0221408e19
+    formatted_df.set_index('time', inplace=True)
+    return formatted_df[formatted_df['nitrogen_dioxide_vertical_column_amount'] > 0]
+
+def fetch_pgn_wrapper(args): return fetch_pgn_api_data(*args)
+
+def find_coord_col(columns, coord_type):
+    for col in columns:
+        if coord_type in col.lower(): return col
+    return None
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    R = 6371.0 
+    dlat, dlon = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
+    a = np.sin(dlat/2)**2 + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2)) * np.sin(dlon/2)**2
+    return R * (2 * np.arctan2(np.sqrt(a), np.sqrt(1-a)))
+
+def get_site_col(df):
+    for c in df.columns:
+        if c.lower() in ['site_id', 'site', 'id', 'sitecode', 'aqs_id', 'aqs', 'station']: return c
+    return None
+
+def process_single_file(file_obj, target_vars, dl_start, min_lat, max_lat, min_lon, max_lon):
+    try:
+        ds_root = xr.open_dataset(file_obj, engine='h5netcdf')
+        try: ds_prod = xr.open_dataset(file_obj, engine='h5netcdf', group='product')
+        except: ds_prod = ds_root
+        try: ds_supp = xr.open_dataset(file_obj, engine='h5netcdf', group='support_data')
+        except: ds_supp = ds_root
+
+        lat_name = 'latitude' if 'latitude' in ds_root.variables else 'lat'
+        lon_name = 'longitude' if 'longitude' in ds_root.variables else 'lon'
+        
+        lat_vals = np.squeeze(ds_root[lat_name].values)
+        lon_vals = np.squeeze(ds_root[lon_name].values)
+        if lat_vals.ndim == 1 and lon_vals.ndim == 1:
+            lon_vals, lat_vals = np.meshgrid(lon_vals, lat_vals)
+        lon_vals = np.where(lon_vals > 180, lon_vals - 360, lon_vals)
+        
+        mask = (lat_vals >= min_lat) & (lat_vals <= max_lat) & (lon_vals >= min_lon) & (lon_vals <= max_lon)
+        if not np.any(mask):
+            ds_root.close()
+            if ds_prod is not ds_root: ds_prod.close()
+            if ds_supp is not ds_root: ds_supp.close()
+            return pd.DataFrame()
+        
+        data_dict = {'lat': lat_vals[mask], 'lon': lon_vals[mask]}
+        time_val = dl_start
+        filename = os.path.basename(file_obj)
+        
+        match = re.search(r'_(202\d{5}T\d{6}Z)', filename)
+        if match:
+            time_val = pd.to_datetime(match.group(1), format="%Y%m%dT%H%M%SZ")
+            
+        data_dict['time'] = time_val
+        
+        for nc_var, df_col_name in target_vars.items():
+            if nc_var in ds_prod.variables:
+                vals = np.squeeze(ds_prod[nc_var].values)
+            elif nc_var in ds_supp.variables:
+                vals = np.squeeze(ds_supp[nc_var].values)
+            elif nc_var in ds_root.variables:
+                vals = np.squeeze(ds_root[nc_var].values)
+            else:
+                continue
+                
+            masked_vals = vals[mask]
+            masked_vals = np.where(masked_vals < -900, np.nan, masked_vals)
+            data_dict[df_col_name] = masked_vals
+        
+        df = pd.DataFrame(data_dict)
+        cols_present = [v for v in target_vars.values() if v in df.columns]
+        if cols_present:
+            df = df.dropna(subset=cols_present, how='all')
+        
+        ds_root.close()
+        if ds_prod is not ds_root: ds_prod.close()
+        if ds_supp is not ds_root: ds_supp.close()
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
+def fetch_local_earthdata_product(directory, product_prefix, target_date_str, target_vars, dl_start, min_lat, max_lat, min_lon, max_lon):
+    target_date_compact = target_date_str.replace("-", "")
+    local_files = []
+    for root, dirs, files in os.walk(directory):
+        for f in files:
+            if f.endswith(('.nc', '.h5', '.nc4')) and target_date_compact in f and product_prefix in f:
+                local_files.append(os.path.join(root, f))
+    
+    if not local_files:
+        return pd.DataFrame()
+
+    df_list = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(process_single_file, f_obj, target_vars, dl_start, min_lat, max_lat, min_lon, max_lon) for f_obj in local_files]
+        for future in concurrent.futures.as_completed(futures):
+            df = future.result()
+            if not df.empty: df_list.append(df)
+            
+    if df_list:
+        combined_df = pd.concat(df_list)
+        return standardize_index(combined_df)
+    return pd.DataFrame()
+
+def get_exact_overpass_time(sat, target_date_str, bbox_tuple, local_timezone):
+    short_name = "MOD04_L2" if sat == 'Terra' else "MYD04_L2"
+    try:
+        results = earthaccess.search_data(
+            short_name=short_name,
+            bounding_box=bbox_tuple,
+            temporal=(f"{target_date_str}T00:00:00", f"{target_date_str}T23:59:59"),
+            count=1
+        )
+        if results:
+            dt_str = results[0]['umm']['TemporalExtents'][0]['RangeDateTimes'][0]['BeginningDateTime']
+            dt_utc = pd.to_datetime(dt_str)
+            dt_local = dt_utc.tz_convert(local_timezone)
+            return dt_local.strftime('%I:%M %p Local')
+    except Exception:
+        pass
+    return "~10:30 AM Local" if sat == 'Terra' else "~01:30 PM Local"
+
+# Configuration
+city_choice = input("Select Target City:\n  [1] Atlanta\n  [2] Mexico City\nEnter choice (1 or 2) [Default: 2]: ").strip() or "2"
+VMIN = 1E14
+CLOUD_THRESHOLD = 0.20  
+
+if city_choice == "2":
+    city_name, display_name = "Mexico_City", "Mexico City"
+    local_tz = pytz.timezone("America/Mexico_City")
+    min_lon, max_lon, min_lat, max_lat = -100.15, -98.10, 18.20, 20.85
+    gcas_coords = [(-98.790958, 18.916636), (-99.281739, 18.862281), (-99.461719, 20.123750), (-98.966317, 20.175578)]
+    VMAX, vmax_display = 3E16, "3.0" 
+else:
+    city_name, display_name = "Atlanta", "Atlanta"
+    local_tz = pytz.timezone("America/New_York")
+    min_lon, max_lon, min_lat, max_lat = -85.75, -83.25, 32.65, 35.00
+    gcas_coords = [(-84.24948, 33.22187), (-83.82170, 33.51416), (-84.75725, 34.42232), (-85.20172, 34.14424)]
+    VMAX, vmax_display = 1E16, "1.0" 
+
+pad, grid_res = 0.1, 0.05 
+dl_bbox = (min_lon - pad, min_lat - pad, max_lon + pad, max_lat + pad)
+lon_bins, lat_bins = np.arange(min_lon - pad, max_lon + pad + grid_res, grid_res), np.arange(min_lat - pad, max_lat + pad + grid_res, grid_res)
+total_possible_cells = (len(lon_bins) - 1) * (len(lat_bins) - 1)
+
+
+target_month_str = input("Enter Target Year & Month (YYYY-MM) [Default: 2024-05]: ") or "2024-05"
+target_year, target_month = map(int, target_month_str.split('-'))
+num_days_in_month = calendar.monthrange(target_year, target_month)[1]
+date_list = [datetime(target_year, target_month, day) for day in range(1, num_days_in_month + 1)]
+
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(script_dir, "data")
+folder = os.path.join(script_dir, "outputs", target_month_str)
+os.makedirs(folder, exist_ok=True)
+print(f"\nOutput directory: {folder}\n")
+save_dir = folder
+csv_dir = folder
+simat_dir = os.path.join(data_dir, "simat")
+downloads_tempo_dir = os.path.join(data_dir, "tempo")
+
+l3_tempokey, l3_tempocol = 'vertical_column_troposphere', 'no2_vertical_column_troposphere'
+l3_strat_key, l3_strat_col = 'vertical_column_stratosphere', 'no2_vertical_column_stratosphere'
+l3_cf_key, l3_cf_col = 'cloud_fraction', 'cloud_fraction'
+aqs_o3_key, aqs_pm25_key = 'aqs.ozone', 'aqs.pm25' 
+pandoracol = 'nitrogen_dioxide_vertical_column_amount'
+
+atlanta_aqs_sites = ['130670003', '130890002', '130970004', '131210055', '131350002', '131510002', '132319991', '132470001']
+
+# Monthly processing
+for target_date in date_list:
+    target_date_str = target_date.strftime("%Y-%m-%d")
+    day_of_week = target_date.strftime("%A")
+    print(f"\nProcessing {target_date_str} ({day_of_week})")
+    
+    hour_list = [target_date.replace(hour=12) + timedelta(hours=i) for i in range(12)]
+    dl_start = hour_list[0] - timedelta(hours=1)
+    
+    local_start_dt = local_tz.localize(target_date)
+    utc_start_dt = local_start_dt.astimezone(pytz.UTC).replace(tzinfo=None)
+    full_day_hours_utc = [utc_start_dt + timedelta(hours=i) for i in range(24)]
+
+    # Satellite imagery and overpass times
+    worldview_dir = os.path.join(save_dir, 'Worldview_Images')
+    os.makedirs(worldview_dir, exist_ok=True)
+    gibs_bbox = f"{min_lon},{min_lat},{max_lon},{max_lat}"
+    img_width = 800
+    img_height = int(img_width * ((max_lat - min_lat) / (max_lon - min_lon)))
+    gibs_url = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
+
+    satellite_layers = {'Terra': 'MODIS_Terra_CorrectedReflectance_TrueColor', 'Aqua': 'MODIS_Aqua_CorrectedReflectance_TrueColor'}
+    worldview_images = {}
+    exact_overpass_times = {}
+
+    def download_wv(sat_name, layer_name):
+        params = {"SERVICE": "WMS", "VERSION": "1.1.1", "REQUEST": "GetMap", "LAYERS": layer_name,
+                  "SRS": "EPSG:4326", "BBOX": gibs_bbox, "WIDTH": str(img_width), "HEIGHT": str(img_height),
+                  "FORMAT": "image/jpeg", "TIME": target_date_str}
+        try:
+            response = wv_session.get(gibs_url, params=params, timeout=60)
+            if response.status_code == 200:
+                img_filename = os.path.join(worldview_dir, f"{city_name}_{sat_name}_{target_date_str}_raw.jpg")
+                with open(img_filename, 'wb') as f: f.write(response.content)
+                return sat_name, img_filename
+        except Exception: pass
+        return sat_name, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures_wv = [executor.submit(download_wv, sat, lay) for sat, lay in satellite_layers.items()]
+        for future in concurrent.futures.as_completed(futures_wv):
+            sat, path = future.result()
+            if path: worldview_images[sat] = path
+        
+        futures_time = {executor.submit(get_exact_overpass_time, sat, target_date_str, dl_bbox, local_tz): sat for sat in ['Terra', 'Aqua']}
+        for future in concurrent.futures.as_completed(futures_time):
+            sat = futures_time[future]
+            exact_overpass_times[sat] = future.result()
+
+    # TEMPO and surface observations
+    l3_tasks_no2 = {"TEMPO_NO2_L3": {l3_tempokey: l3_tempocol, l3_strat_key: l3_strat_col}}
+    l3_tasks_cloud = {"TEMPO_CLDO4_L3": {l3_cf_key: l3_cf_col}}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_no2 = executor.submit(fetch_local_earthdata_product, downloads_tempo_dir, "TEMPO_NO2_L3", target_date_str, l3_tasks_no2["TEMPO_NO2_L3"], dl_start, min_lat, max_lat, min_lon, max_lon)
+        future_cld = executor.submit(fetch_local_earthdata_product, downloads_tempo_dir, "TEMPO_CLDO4_L3", target_date_str, l3_tasks_cloud["TEMPO_CLDO4_L3"], dl_start, min_lat, max_lat, min_lon, max_lon)
+        all_l3_df = future_no2.result()
+        all_cf_df = future_cld.result()
+    all_l3_strat_df = all_l3_df.copy()
+
+    dl_start_str_rsig = full_day_hours_utc[0].strftime("%Y-%m-%dT%H:00:00")
+    dl_end_str_rsig = full_day_hours_utc[-1].replace(minute=59, second=59).strftime("%Y-%m-%dT%H:%M:%S")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rsigapi_batch = pyrsig.RsigApi(bdate=dl_start_str_rsig, edate=dl_end_str_rsig, bbox=dl_bbox, workdir=tmpdir)
+        rsigapi_batch.tempo_kw['api_key'] = 'none'
+        fetch_tasks = {}
+        if city_choice == "1":
+            fetch_tasks['o3'] = aqs_o3_key
+            fetch_tasks['pm25'] = aqs_pm25_key
+            
+        results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            futures = {executor.submit(fetch_with_retries, rsigapi_batch, key): name for name, key in fetch_tasks.items()}
+            for future in concurrent.futures.as_completed(futures):
+                results[futures[future]] = future.result()
+        all_aqs_o3 = results.get('o3', pd.DataFrame())
+        all_aqs_pm25 = results.get('pm25', pd.DataFrame())
+
+    target_aqs_sites = atlanta_aqs_sites
+    if city_choice == "2":
+        simat_csv_path = os.path.join(simat_dir, f"contaminantes_{target_date.year}.csv")
+        if os.path.exists(simat_csv_path):
+            all_aqs_o3, all_aqs_pm25 = load_simat_csv(simat_csv_path, target_date)
+            sites_o3 = all_aqs_o3['STATION'].unique().tolist() if not all_aqs_o3.empty else []
+            sites_pm = all_aqs_pm25['STATION'].unique().tolist() if not all_aqs_pm25.empty else []
+            target_aqs_sites = sorted(list(set(sites_o3 + sites_pm)))
+        else: target_aqs_sites = []
+
+    num_sites = max(1, len(target_aqs_sites))
+    cmap_colors = plt.get_cmap('turbo')(np.linspace(0, 1, num_sites))
+    aqs_color_dict = {name: cmap_colors[i] for i, name in enumerate(target_aqs_sites)}
+
+    pgn_args = [(142, "MexicoCity-UNAM", 19.33, -99.18, target_date, 38), (157, "MexicoCity-Vallejo", 19.50, -99.15, target_date, 38)] if city_choice == "2" else [
+        (92, "AtlantaGA-Downtown", 33.8, -84.39, target_date, 38), (158, "AtlantaGA-Conyers", 33.6, -84.00, target_date, 38),
+        (173, "AtlantaGA-GATech", 33.8, -84.40, target_date, 38), (237, "AtlantaGA-SouthDeKalb", 33.7, -84.28, target_date, 38)]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor: 
+        pan_dfs = [df for df in list(executor.map(fetch_pgn_wrapper, pgn_args)) if not df.empty]
+
+    if pan_dfs:
+        all_pan_df = pd.concat(pan_dfs)
+        master_stations = all_pan_df.groupby('STATION').agg({'lon': 'first', 'lat': 'first'}).reset_index()
+    else: 
+        all_pan_df, master_stations = pd.DataFrame(), pd.DataFrame()
+
+    all_pan_df, all_aqs_o3, all_aqs_pm25 = map(standardize_index, [all_pan_df, all_aqs_o3, all_aqs_pm25])
+
+    # Figure layout
+    data_crs = ccrs.PlateCarree()
+    fig = plt.figure(figsize=(42, 32), facecolor='white') 
+
+    title_text = f"{display_name} GCAS Region Combined Data Analysis ({day_of_week}, {target_date_str})"
+    fig.text(0.5, 0.96, title_text, fontsize=48, fontweight='bold', ha='center', va='center', bbox=dict(facecolor='white', edgecolor='lightgray', pad=0.5, alpha=0.9, boxstyle='round'))
+    stats_text = (f"Time Window: 12:00 - 23:00 UTC  |  Data Source: Hybrid (L3 NO$_2$ & L3 cldo4 > {int(CLOUD_THRESHOLD*100)}%)\n"
+                  f"Map Color Scale: 1.0$\\times 10^{{14}}$ to {vmax_display}$\\times 10^{{16}}$ molec/cm$^2$  |  TEMPO Search Radius: 5.0 km")
+    fig.text(0.24, 0.85, stats_text, fontsize=26, ha='center', va='center', bbox=dict(boxstyle='round,pad=0.8', facecolor='whitesmoke', edgecolor='gray', alpha=0.9))
+    cbar_ax = fig.add_axes([0.14, 0.79, 0.20, 0.012]) 
+
+    gs_left = gridspec.GridSpec(3, 4, left=0.02, right=0.5, top=0.75, bottom=0.05, hspace=0.15, wspace=0.15)
+    axes_maps = []
+    for row in range(3):
+        for col in range(4):
+            axes_maps.append(fig.add_subplot(gs_left[row, col], projection=data_crs))
+
+    gs_right = gridspec.GridSpec(5, 3, left=0.55, right=0.98, top=0.90, bottom=0.05, height_ratios=[1,1,1.5,1.5,1.8], hspace=0.7, wspace=0.25)
+    ax_ts_success = fig.add_subplot(gs_right[0, :])
+    ax_ts_combined = fig.add_subplot(gs_right[1, :], sharex=ax_ts_success) 
+    ax_ts_o3 = fig.add_subplot(gs_right[2, :]) 
+    ax_ts_pm = fig.add_subplot(gs_right[3, :], sharex=ax_ts_o3) 
+    ax_wv_terra = fig.add_subplot(gs_right[4, 0], projection=data_crs)
+    ax_wv_aqua = fig.add_subplot(gs_right[4, 1], projection=data_crs)
+    ax_scatter = fig.add_subplot(gs_right[4, 2])
+
+    shpfilename = shpreader.natural_earth(resolution='10m', category='cultural', name='roads_north_america')
+    main_roads = [rec.geometry for rec in shpreader.Reader(shpfilename).records() if rec.geometry.intersects(box(min_lon, min_lat, max_lon, max_lat)) and any(kw in str(rec.attributes).lower() for kw in ['highway', 'interstate', 'freeway', 'tollway'])]
+    gcas_poly = Polygon(gcas_coords)
+
+    # Hourly processing
+    times, total_l3_list, valid_l3_list, mean_cf_list = [], [], [], []
+    X_centers, Y_centers = np.meshgrid(lon_bins[:-1] + grid_res/2, lat_bins[:-1] + grid_res/2)
+    master_map_data = []
+
+    pandora_ts_data = {s: [] for s in master_stations['STATION']} if not master_stations.empty else {}
+    tempo_ts_data = {s: [] for s in master_stations['STATION']} if not master_stations.empty else {}
+    aqs_o3_ts_data_12h = {site: [] for site in target_aqs_sites} 
+    aqs_pm25_ts_data_12h = {site: [] for site in target_aqs_sites}
+
+    c_cmap = cm.YlOrRd.copy(); c_cmap.set_bad(color='none')
+    invalid_cmap = mcolors.ListedColormap(['lightblue'])
+    land_feature, coastline_feature, states_feature = cfeature.LAND, cfeature.COASTLINE, cfeature.STATES
+
+    for idx, current_time in enumerate(hour_list):
+        ax = axes_maps[idx]
+        next_hour = current_time + timedelta(hours=1)
+        current_time_local = pytz.UTC.localize(current_time).astimezone(local_tz)
+        hr_label = current_time_local.strftime('%I:%M %p')
+        
+        t_cf = get_hourly_slice_fast(all_cf_df, current_time, next_hour)
+        if not t_cf.empty and l3_cf_col in t_cf.columns:
+            cf_vals_mean = pd.to_numeric(t_cf[l3_cf_col], errors='coerce')
+            mean_cf_list.append(cf_vals_mean[(cf_vals_mean >= 0) & (cf_vals_mean <= 1.0)].mean())
+        else: mean_cf_list.append(np.nan)
+            
+        t_l3 = get_hourly_slice_fast(all_l3_df, current_time, next_hour)
+        t_l3_strat = get_hourly_slice_fast(all_l3_strat_df, current_time, next_hour)
+        t_pan = get_hourly_slice_fast(all_pan_df, current_time, next_hour)
+
+        invalid_grid, tempo_grid_mean = np.full((len(lat_bins) - 1, len(lon_bins) - 1), np.nan), np.full((len(lat_bins) - 1, len(lon_bins) - 1), np.nan)
+        valid_l3, cloudy_cells = 0, 0
+
+        if not t_cf.empty and l3_cf_col in t_cf.columns:
+            cf_lon, cf_lat = find_coord_col(t_cf.columns, 'lon'), find_coord_col(t_cf.columns, 'lat')
+            t_cf[l3_cf_col] = pd.to_numeric(t_cf[l3_cf_col], errors='coerce')
+            valid_cf = t_cf[(t_cf[l3_cf_col] >= 0.0) & (t_cf[l3_cf_col] <= 1.0)].dropna(subset=[cf_lon, cf_lat, l3_cf_col])
+            if not valid_cf.empty:
+                cf_stats, _, _, _ = binned_statistic_2d(valid_cf[cf_lon], valid_cf[cf_lat], valid_cf[l3_cf_col], statistic='mean', bins=[lon_bins, lat_bins])
+                invalid_grid = np.where(cf_stats.T > CLOUD_THRESHOLD, 1, np.nan)
+                cloudy_cells = np.count_nonzero(~np.isnan(invalid_grid))
+                
+        work_l3 = pd.DataFrame()
+        if not t_l3.empty and l3_tempocol in t_l3.columns:
+            l3_lon, l3_lat = find_coord_col(t_l3.columns, 'lon'), find_coord_col(t_l3.columns, 'lat')
+            t_l3[l3_tempocol] = pd.to_numeric(t_l3[l3_tempocol], errors='coerce')
+            t_l3.loc[t_l3[l3_tempocol] < -900, l3_tempocol] = np.nan
+            work_l3 = t_l3[[l3_lon, l3_lat, l3_tempocol]].dropna().copy()
+            if not work_l3.empty:
+                stats, _, _, _ = binned_statistic_2d(work_l3[l3_lon], work_l3[l3_lat], work_l3[l3_tempocol], statistic='mean', bins=[lon_bins, lat_bins])
+                tempo_grid_mean, valid_l3 = stats.T, np.count_nonzero(~np.isnan(stats.T))
+
+        grid_df = pd.DataFrame({'Time_UTC': current_time, 'lon': X_centers.flatten(), 'lat': Y_centers.flatten(), 'NO2_Value': tempo_grid_mean.flatten()})
+        grid_df['SUCCESS'] = np.where(~np.isnan(tempo_grid_mean.flatten()), 1, 0)
+        grid_df['HAS_CLOUD'] = np.where(~np.isnan(invalid_grid.flatten()), 1, 0)
+        master_map_data.append(grid_df)
+
+        total_l3_df = pd.DataFrame()
+        if not work_l3.empty and not t_l3_strat.empty and l3_strat_col in t_l3_strat.columns:
+            t_l3_strat[l3_strat_col] = pd.to_numeric(t_l3_strat[l3_strat_col], errors='coerce')
+            t_l3_strat.loc[t_l3_strat[l3_strat_col] < -900, l3_strat_col] = np.nan
+            st_lon, st_lat = find_coord_col(t_l3_strat.columns, 'lon'), find_coord_col(t_l3_strat.columns, 'lat')
+            merged = pd.merge(work_l3, t_l3_strat[[st_lon, st_lat, l3_strat_col]], left_on=[l3_lon, l3_lat], right_on=[st_lon, st_lat], how='left')
+            merged['total_no2'] = merged[l3_tempocol] + merged[l3_strat_col].fillna(0)
+            total_l3_df = merged
+
+        for st in tempo_ts_data.keys():
+            if not total_l3_df.empty:
+                row = master_stations[master_stations['STATION'] == st].iloc[0]
+                nb = total_l3_df[haversine_distance(total_l3_df[l3_lat], total_l3_df[l3_lon], row['lat'], row['lon']) <= 5.0]
+                tempo_ts_data[st].append(nb['total_no2'].mean() if not nb.empty else np.nan)
+            else: tempo_ts_data[st].append(np.nan)
+
+        pandora_hr = master_stations.copy() if not master_stations.empty else pd.DataFrame()
+        if not pandora_hr.empty:
+            pandora_hr[pandoracol] = np.nan
+            if not t_pan.empty and pandoracol in t_pan.columns:
+                pandora_hr[pandoracol] = pandora_hr['STATION'].map(t_pan.groupby('STATION')[pandoracol].mean())
+            for st in pandora_ts_data.keys():
+                v = pandora_hr.loc[pandora_hr['STATION'] == st, pandoracol]
+                pandora_ts_data[st].append(v.iloc[0] if not v.empty else np.nan)
+
+        t_o3, t_pm = get_hourly_slice_fast(all_aqs_o3, current_time, next_hour), get_hourly_slice_fast(all_aqs_pm25, current_time, next_hour)
+        if not t_o3.empty:
+            site_col = get_site_col(t_o3)
+            val_col_opts = [c for c in t_o3.columns if c.lower() in ['obs', 'value', 'ozone', 'o3', 'measure']]
+            val_col = val_col_opts[0] if val_col_opts else None
+            if site_col and val_col:
+                t_o3['CLEAN_SITE'] = t_o3[site_col].astype(str).str.replace(r'\.0$', '', regex=True)
+                site_means = t_o3.groupby('CLEAN_SITE')[val_col].mean()
+                for site in target_aqs_sites: aqs_o3_ts_data_12h[site].append(site_means.get(site, np.nan))
+            else:
+                for site in target_aqs_sites: aqs_o3_ts_data_12h[site].append(np.nan)
+        else:
+            for site in target_aqs_sites: aqs_o3_ts_data_12h[site].append(np.nan)
+
+        if not t_pm.empty:
+            site_col = get_site_col(t_pm)
+            val_col_opts = [c for c in t_pm.columns if c.lower() in ['obs', 'value', 'pm25', 'pm2.5', 'measure']]
+            val_col = val_col_opts[0] if val_col_opts else None
+            if site_col and val_col:
+                t_pm['CLEAN_SITE'] = t_pm[site_col].astype(str).str.replace(r'\.0$', '', regex=True)
+                site_means = t_pm.groupby('CLEAN_SITE')[val_col].mean()
+                for site in target_aqs_sites: aqs_pm25_ts_data_12h[site].append(site_means.get(site, np.nan))
+            else:
+                for site in target_aqs_sites: aqs_pm25_ts_data_12h[site].append(np.nan)
+        else:
+            for site in target_aqs_sites: aqs_pm25_ts_data_12h[site].append(np.nan)
+
+        times.append(current_time)
+        total_l3_list.append(total_possible_cells); valid_l3_list.append(valid_l3)
+
+        ax.set_extent([min_lon, max_lon, min_lat, max_lat], crs=data_crs)
+        ax.add_feature(land_feature, facecolor='whitesmoke', zorder=0)
+        ax.add_feature(coastline_feature, edgecolor='black', zorder=5)
+        ax.add_feature(states_feature, edgecolor='black', linestyle='-', zorder=5)
+        ax.add_geometries(main_roads, crs=data_crs, edgecolor='black', linewidth=1.5, facecolor='none', alpha=0.8, zorder=6)
+        ax.add_geometries([gcas_poly], crs=data_crs, edgecolor='black', linewidth=2.5, facecolor='none', zorder=7)
+
+        if valid_l3 > 0: ax.pcolormesh(lon_bins, lat_bins, tempo_grid_mean, cmap=c_cmap, vmin=VMIN, vmax=VMAX, transform=data_crs, zorder=2, alpha=0.85, rasterized=True)
+        ax.pcolormesh(lon_bins, lat_bins, invalid_grid, cmap=invalid_cmap, transform=data_crs, zorder=3, alpha=1.0, rasterized=True)
+
+        if len(t_l3) == 0: 
+            ax.text(0.5, 0.5, 'NO OVERPASS', transform=ax.transAxes, fontsize=12, fontweight='bold', color='dimgray', ha='center', va='center', alpha=0.8, zorder=10, bbox=dict(boxstyle='round', facecolor='white', alpha=0.6, edgecolor='none'))
+
+        if not pandora_hr.empty:
+            valid_p, miss_p = pandora_hr.dropna(subset=[pandoracol]), pandora_hr[pandora_hr[pandoracol].isna()]
+            if not miss_p.empty: ax.scatter(miss_p['lon'], miss_p['lat'], c='black', s=200, edgecolors='white', linewidths=2.5, transform=data_crs, zorder=8)
+            if not valid_p.empty: ax.scatter(valid_p['lon'], valid_p['lat'], c=valid_p[pandoracol], cmap='YlOrRd', s=200, edgecolors='white', linewidths=2.5, vmin=VMIN, vmax=VMAX, transform=data_crs, zorder=8)
+
+        gl = ax.gridlines(draw_labels=True, linestyle='--', color='gray', alpha=0.4, zorder=4)
+        gl.top_labels = gl.right_labels = False
+        gl.xlocator, gl.ylocator = mticker.MaxNLocator(3), mticker.MaxNLocator(4)
+        if (idx % 4) > 0: gl.left_labels = False
+        if (idx // 4) < 2: gl.bottom_labels = False
+        ax.set_title(hr_label, fontsize=24, fontweight='bold')
+        map_cloud_pct = (cloudy_cells / total_possible_cells) * 100.0 if total_possible_cells > 0 else 0.0
+        ax.text(0.03, 0.03, f"Cloud Cover: {map_cloud_pct:.1f}%", transform=ax.transAxes, fontsize=16, fontweight='bold', va='bottom', ha='left', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), zorder=9)
+
+    aqs_o3_ts_data_24h = {site: [] for site in target_aqs_sites}
+    aqs_pm25_ts_data_24h = {site: [] for site in target_aqs_sites}
+
+    for current_time in full_day_hours_utc:
+        next_hour = current_time + timedelta(hours=1)
+        t_o3, t_pm = get_hourly_slice_fast(all_aqs_o3, current_time, next_hour), get_hourly_slice_fast(all_aqs_pm25, current_time, next_hour)
+        if not t_o3.empty:
+            site_col = get_site_col(t_o3)
+            val_col_opts = [c for c in t_o3.columns if c.lower() in ['obs', 'value', 'ozone', 'o3', 'measure']]
+            val_col = val_col_opts[0] if val_col_opts else None
+            if site_col and val_col:
+                t_o3['CLEAN_SITE'] = t_o3[site_col].astype(str).str.replace(r'\.0$', '', regex=True)
+                site_means = t_o3.groupby('CLEAN_SITE')[val_col].mean()
+                for site in target_aqs_sites: aqs_o3_ts_data_24h[site].append(site_means.get(site, np.nan))
+            else:
+                for site in target_aqs_sites: aqs_o3_ts_data_24h[site].append(np.nan)
+        else:
+            for site in target_aqs_sites: aqs_o3_ts_data_24h[site].append(np.nan)
+
+        if not t_pm.empty:
+            site_col = get_site_col(t_pm)
+            val_col_opts = [c for c in t_pm.columns if c.lower() in ['obs', 'value', 'pm25', 'pm2.5', 'measure']]
+            val_col = val_col_opts[0] if val_col_opts else None
+            if site_col and val_col:
+                t_pm['CLEAN_SITE'] = t_pm[site_col].astype(str).str.replace(r'\.0$', '', regex=True)
+                site_means = t_pm.groupby('CLEAN_SITE')[val_col].mean()
+                for site in target_aqs_sites: aqs_pm25_ts_data_24h[site].append(site_means.get(site, np.nan))
+            else:
+                for site in target_aqs_sites: aqs_pm25_ts_data_24h[site].append(np.nan)
+        else:
+            for site in target_aqs_sites: aqs_pm25_ts_data_24h[site].append(np.nan)
+
+    # Time series and comparison plots
+    times_local = [pytz.UTC.localize(t).astimezone(local_tz).replace(tzinfo=None) for t in times]
+    full_day_hours_local = [pytz.UTC.localize(t).astimezone(local_tz).replace(tzinfo=None) for t in full_day_hours_utc]
+
+
+    ax_ts_success.plot(times_local, total_l3_list, marker='s', linestyle='--', color='darkgray', linewidth=2, label='Total Expected L3 Cells')
+    ax_ts_success.plot(times_local, valid_l3_list, marker='s', linestyle='-', color='firebrick', linewidth=3, label='Valid L3 Grid Cells')
+    ax_ts_success.fill_between(times_local, valid_l3_list, total_l3_list, color='firebrick', alpha=0.1)
+    ax_ts_success.set_title("TEMPO Data Success (L3 Grid Cells)", fontsize=30, fontweight='bold')
+    ax_ts_success.set_ylabel("Count", fontsize=19)
+    ax_ts_success.set_ylim([0, 3000])
+    ax_ts_success.legend(loc='upper left', ncol=2, fontsize=12)
+    ax_ts_success.grid(True, linestyle=':', alpha=0.7)
+    ax_ts_success.xaxis.set_major_formatter(mdates.DateFormatter('%I %p'))
+    ax_ts_success.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+
+    colors = [('darkblue', 'cornflowerblue'), ('darkgreen', 'limegreen'), ('darkred', 'lightcoral'), ('purple', 'orchid')]
+    if not master_stations.empty:
+        for i, st in enumerate(master_stations['STATION']):
+            dk, lt = colors[i % len(colors)]
+            if not np.isnan(pandora_ts_data[st]).all(): ax_ts_combined.plot(times_local, pandora_ts_data[st], marker='^', linestyle='-', color=dk, lw=3, label=f'Pan: {st}')
+            if not np.isnan(tempo_ts_data[st]).all(): ax_ts_combined.plot(times_local, tempo_ts_data[st], marker='D', linestyle='--', color=lt, lw=3, label=f'TEMPO Total (5km): {st}')
+    ax_ts_combined.set_title("TEMPO Total Column (Trop+Strat) vs Pandora Direct Sun", fontsize=30, fontweight='bold')
+    ax_ts_combined.set_ylabel("NO$_2$ [molec/cm$^2$]", fontsize=19)
+    ax_ts_combined.set_ylim([0, 1e17])
+    ax_ts_combined.legend(loc='upper left', ncol=2, fontsize=12)
+    ax_ts_combined.grid(True, linestyle=':', alpha=0.7)
+
+    for stat, vals in aqs_o3_ts_data_24h.items():
+        if not np.isnan(vals).all(): 
+            lw_val = 2.0 if city_choice == "2" else 3
+            ax_ts_o3.plot(full_day_hours_local, vals, marker='o', ls='-', color=aqs_color_dict.get(stat, 'gray'), lw=lw_val, alpha=0.85, zorder=10, label=f"{stat}")
+    if city_choice == "2" and aqs_o3_ts_data_24h:
+        valid_o3 = [v for v in aqs_o3_ts_data_24h.values() if not np.isnan(v).all()]
+        if valid_o3:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                o3_avg = np.nanmean(valid_o3, axis=0)
+            ax_ts_o3.plot(full_day_hours_local, o3_avg, color='black', lw=6, zorder=20, label='City Average')
+
+    ax_ts_o3.set_title("Surface Stations (Ozone)", fontsize=30, fontweight='bold', pad=10)
+    ax_ts_o3.set_ylabel("Ozone [ppb]", fontsize=20)
+    ax_ts_o3.set_ylim([0, 200])
+    ax_ts_o3.grid(True, linestyle=':', alpha=0.7)
+    if len(ax_ts_o3.get_legend_handles_labels()[0]) > 0:
+        ax_ts_o3.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=8, fontsize=12, framealpha=0.9)
+    else:
+        ax_ts_o3.text(0.5, 0.5, 'No Ozone Data Available', fontsize=24, color='gray', ha='center', va='center', transform=ax_ts_o3.transAxes)
+
+    for stat, vals in aqs_pm25_ts_data_24h.items():
+        if not np.isnan(vals).all(): 
+            lw_val = 2.0 if city_choice == "2" else 3
+            ax_ts_pm.plot(full_day_hours_local, vals, marker='s', ls='--', color=aqs_color_dict.get(stat, 'gray'), lw=lw_val, alpha=0.85, zorder=10, label=f"{stat}")
+    if city_choice == "2" and aqs_pm25_ts_data_24h:
+        valid_pm = [v for v in aqs_pm25_ts_data_24h.values() if not np.isnan(v).all()]
+        if valid_pm:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                pm_avg = np.nanmean(valid_pm, axis=0)
+            ax_ts_pm.plot(full_day_hours_local, pm_avg, color='black', lw=6, zorder=20, label='City Average')
+
+    ax_ts_pm.set_title("Surface Stations (PM2.5)", fontsize=30, fontweight='bold', pad=10)
+    ax_ts_pm.set_ylabel("PM2.5 [μg/m³]", fontsize=20)
+    ax_ts_pm.set_xlabel(f"Local Time ({local_tz.zone})", fontsize=20)
+    ax_ts_pm.set_ylim([0, 150])
+    ax_ts_pm.grid(True, linestyle=':', alpha=0.7)
+    if len(ax_ts_pm.get_legend_handles_labels()[0]) > 0:
+        ax_ts_pm.legend(loc='upper center', bbox_to_anchor=(0.5, -0.22), ncol=8, fontsize=12, framealpha=0.9)
+    else:
+        ax_ts_pm.text(0.5, 0.5, 'No PM2.5 Data Available', fontsize=24, color='gray', ha='center', va='center', transform=ax_ts_pm.transAxes)
+
+    ax_ts_pm.xaxis.set_major_formatter(mdates.DateFormatter('%I %p'))
+    ax_ts_pm.xaxis.set_major_locator(mdates.HourLocator(interval=2))  
+
+    for ax_obj in [ax_ts_success, ax_ts_combined, ax_ts_o3, ax_ts_pm]: ax_obj.tick_params(axis='y', labelsize=19)
+    for ax_obj in [ax_ts_success, ax_ts_o3]: ax_obj.tick_params(axis='x', labelbottom=False)
+    ax_ts_combined.tick_params(axis='x', labelsize=19)
+    ax_ts_pm.tick_params(axis='x', labelsize=19)
+
+    for ax_wv, sat in [(ax_wv_terra, 'Terra'), (ax_wv_aqua, 'Aqua')]:
+        ax_wv.set_extent([min_lon, max_lon, min_lat, max_lat], crs=data_crs)
+        if sat in worldview_images:
+            img = mpimg.imread(worldview_images[sat])
+            ax_wv.imshow(img, origin='upper', extent=[min_lon, max_lon, min_lat, max_lat], transform=data_crs)
+        ax_wv.add_feature(cfeature.COASTLINE, edgecolor='white', zorder=5)
+        ax_wv.add_feature(cfeature.STATES, edgecolor='white', linestyle='-', zorder=5)
+        ax_wv.add_geometries(main_roads, crs=data_crs, edgecolor='yellow', linewidth=1, facecolor='none', alpha=0.8, zorder=6)
+        ax_wv.add_geometries([gcas_poly], crs=data_crs, edgecolor='white', linewidth=2, facecolor='none', zorder=7)
+        sat_time = exact_overpass_times.get(sat, "~10:30 AM Local" if sat == 'Terra' else "~01:30 PM Local")
+        ax_wv.set_title(f"{sat} Overpass: {sat_time}", fontsize=24, fontweight='bold', y=-0.15)
+        ax_wv.axis('off')
+
+    x_vals_list, y_vals_list = [], []
+    if not master_stations.empty:
+        for st in tempo_ts_data.keys():
+            for p_val, t_val in zip(pandora_ts_data[st], tempo_ts_data[st]):
+                if not np.isnan(p_val) and not np.isnan(t_val):
+                    x_vals_list.append(p_val); y_vals_list.append(t_val)
+    x_val, y_val = np.array(x_vals_list), np.array(y_vals_list)
+
+    if len(x_val) > 1 and len(y_val) > 1:
+        pearson_r, mean_bias, rmse = np.corrcoef(x_val, y_val)[0, 1], np.mean(y_val - x_val), np.sqrt(np.mean((y_val - x_val)**2))
+        ax_scatter.scatter(x_val, y_val, alpha=0.7, edgecolors='k', color='crimson', label='Matched Data')
+        max_limit, min_limit = max(max(x_val), max(y_val)) * 1.1, min(min(x_val), min(y_val)) * 0.9
+        ax_scatter.plot([min_limit, max_limit], [min_limit, max_limit], 'k--', alpha=0.7, label='1:1 Line')
+        ax_scatter.text(0.05, 0.95, f"$r^2$ = {pearson_r**2:.3f}\nMean Bias = {mean_bias:.2e}\nRMSE = {rmse:.2e}", transform=ax_scatter.transAxes, fontsize=12, va='top', bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8))
+        ax_scatter.set_xlim([min_limit, max_limit]); ax_scatter.set_ylim([min_limit, max_limit])
+        ax_scatter.set_xlabel('Pandora total $\\text{NO}_2$ [molecules/cm$^2$]', fontsize=14)
+        ax_scatter.set_ylabel('TEMPO total $\\text{NO}_2$ [molecules/cm$^2$]', fontsize=14)
+        ax_scatter.set_title('TEMPO vs. Pandora', fontsize=20, fontweight='bold')
+        ax_scatter.tick_params(axis='both', labelsize=12)
+        ax_scatter.grid(True, linestyle=':', alpha=0.6)
+        ax_scatter.legend(loc='lower right', fontsize=11)
+    else:
+        ax_scatter.text(0.5, 0.5, "Insufficient\nMatched Data", ha='center', va='center', fontsize=16)
+        ax_scatter.axis('off')
+
+    sm = plt.cm.ScalarMappable(cmap='YlOrRd', norm=plt.Normalize(vmin=VMIN, vmax=VMAX))
+    cbar = fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
+    cbar.set_label('TEMPO Tropospheric NO$_2$ [molec/cm$^2$]', fontsize=20, fontweight='bold')
+
+    plot_filename = os.path.join(save_dir, f"{city_name}_Full_Dashboard_{target_date_str}.png")
+    fig.savefig(plot_filename, dpi=300, bbox_inches='tight')
+    print(f"Dashboard saved: {plot_filename}")
+
+    # Export
+    if master_map_data:
+        map_df = pd.concat(master_map_data, ignore_index=True)
+        map_csv_path = os.path.join(csv_dir, f"{city_name}_MapGrid_Success_{target_date_str}.csv")
+        map_df.to_csv(map_csv_path, index=False)
+
+    csv_rows = []
+    for i, current_time in enumerate(times):
+        current_cf = mean_cf_list[i] if pd.notna(mean_cf_list[i]) else 1.0
+        success_flag = 1 if current_cf <= CLOUD_THRESHOLD else 0
+        yield_pct = round((valid_l3_list[i] / total_l3_list[i]) * 100.0, 2) if total_l3_list[i] > 0 else 0.0
+        local_time_str = times_local[i].strftime('%Y-%m-%d %I:%M %p')
+        row = {
+            'Time_UTC': current_time.strftime('%Y-%m-%d %H:%M:%S'), 
+            'Time_Local': local_time_str,
+            'Hour_Local': times_local[i].hour,
+            'Date': current_time.strftime('%Y-%m-%d'),
+            'domain_cloud_frac': mean_cf_list[i], 'Data_Success_Flag': success_flag, 'Valid_Pixel_Yield_Pct': yield_pct,
+            'Domain_Total_Expected_L3_Cells': total_l3_list[i], 'Domain_Valid_L3_Cells': valid_l3_list[i]
+        }
+        if not master_stations.empty:
+            for st in tempo_ts_data.keys():
+                clean_st_name = st.split('(')[0].strip() 
+                row[f'Pandora_NO2_{clean_st_name}'] = pandora_ts_data[st][i]
+                row[f'TEMPO_Total_NO2_5km_{clean_st_name}'] = tempo_ts_data[st][i]
+        for site in target_aqs_sites:
+            row[f'Surface_O3_{site}'] = aqs_o3_ts_data_12h[site][i]
+            row[f'Surface_PM25_{site}'] = aqs_pm25_ts_data_12h[site][i]
+        csv_rows.append(row)
+
+    csv_df = pd.DataFrame(csv_rows)
+    csv_filename = os.path.join(csv_dir, f"{city_name}_Time_Series_Data_{target_date_str}.csv")
+    csv_df.to_csv(csv_filename, index=False)
+    print(f"CSV data saved: {csv_filename}")
+    
+    plt.close(fig)
+
+print("\nMonthly processing complete.")
